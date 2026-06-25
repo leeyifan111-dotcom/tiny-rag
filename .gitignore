@@ -1,0 +1,30 @@
+# 环境变量（含 API key，绝对不能上传）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OMC (oh-my-claudecode 本地状态)
+.omc/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.swp
+*.tmp
+*~
+
+# 持久化的向量索引（本地构建，不入仓库）
+*.faiss
+*.pkl
+*.index
