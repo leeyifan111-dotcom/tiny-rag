@@ -12,33 +12,75 @@ indexer.py — 离线建索引
 
 import os
 from dotenv import load_dotenv
+from openai import OpenAI
+import chromadb
 
 load_dotenv()
 
+client = OpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    base_url="https://api.siliconflow.cn/v1",
+)
+
 DOCS_DIR = "docs"
-INDEX_PATH = "tiny.index"
+PERSIST_DIR = "chroma_store"
 
 
 def load_documents(docs_dir: str = DOCS_DIR) -> list[dict]:
     """读取 docs/ 下所有 .md / .txt 文件，返回 [{path, text}, ...]"""
-    # TODO: 实现文件遍历 + 内容读取
-    raise NotImplementedError("等读完 #012 RAG Pipeline 组件再填")
+    docs = []
+    for filename in os.listdir(docs_dir):
+        if not filename.endswith((".md", ".txt")):
+            continue
+        filepath = os.path.join(docs_dir, filename)
+        with open(filepath, "r", encoding="utf-8") as f:
+            text = f.read()
+        docs.append({"path": filename, "text": text})
+    return docs
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """把长文本切成有重叠的 chunks（v0.1 用固定长度，v0.2 升级语义分块）"""
-    # TODO: 实现固定长度切分 + overlap
-    raise NotImplementedError("等读完 #013 分块策略再填")
+    """固定长度分块，尽可能在句子边界切（v0.1，v0.2 升级递归/语义分块）
+
+    做法：按句号切 → 逐句累积 → 接近 chunk_size 就截断 → overlap 粘合衔接
+    """
+    sentences = text.replace("\n", " ").split("。")
+    chunks = []
+    current = ""
+
+    for s in sentences:
+        if not s.strip():
+            continue
+        seg = s + "。"
+
+        if len(current) + len(seg) <= chunk_size:
+            current += seg
+        else:
+            if current.strip():
+                chunks.append(current.strip())
+            current = current[-overlap:] + seg if current else seg
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
 
 
-def embed_text(text: str) -> list[float]:
-    """调用 embedding API，把文本变成向量"""
-    # TODO: 实现 DeepSeek / OpenAI embedding 调用
-    raise NotImplementedError("等读完 #015 Embedding 模型再填")
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """批量调用 DeepSeek embedding API，返回 1024 维向量列表"""
+    resp = client.embeddings.create(
+        model="BAAI/bge-m3",
+        input=texts,
+    )
+    return [d.embedding for d in resp.data]
 
 
-def build_index(docs_dir: str = DOCS_DIR, index_path: str = INDEX_PATH):
-    """主流程：load → chunk → embed → store"""
+def build_index(docs_dir: str = DOCS_DIR, persist_dir: str = PERSIST_DIR):
+    """主流程：load → chunk → embed（DeepSeek API） → store（Chroma）
+
+    v0.1: DeepSeek embedding（1024 维，中文友好，复用已有 key）。
+    v0.2: 可选换 bge-m3 本地模型，降低 API 成本。
+    """
     docs = load_documents(docs_dir)
     print(f"📂 加载 {len(docs)} 个文档")
 
@@ -49,8 +91,38 @@ def build_index(docs_dir: str = DOCS_DIR, index_path: str = INDEX_PATH):
             all_chunks.append({"text": chunk, "source": doc["path"]})
     print(f"✂️  切成 {len(all_chunks)} 个 chunks")
 
-    # TODO: 批量 embed + 存 FAISS
-    raise NotImplementedError("等读完 #014 向量数据库选型再填")
+    # 批量 embedding（DeepSeek 一次最多 32 条，这里 109 条分 4 批）
+    BATCH = 32
+    texts = [c["text"] for c in all_chunks]
+    all_vectors = []
+    print(f"🧮 正在嵌入 {len(texts)} 个 chunks（model: deepseek-embedding）...")
+    for i in range(0, len(texts), BATCH):
+        batch = texts[i:i + BATCH]
+        vectors = embed_texts(batch)
+        all_vectors.extend(vectors)
+        print(f"   {min(i + BATCH, len(texts))}/{len(texts)}")
+
+    # 持久化客户端
+    client_db = chromadb.PersistentClient(path=persist_dir)
+    collection = client_db.get_or_create_collection("tiny-rag")
+
+    # 清空旧数据
+    existing = collection.get()
+    if existing["ids"]:
+        collection.delete(ids=existing["ids"])
+
+    # 写入：预先算好的 embeddings（不用 Chroma 内置英文模型）
+    ids = [str(i) for i in range(len(all_chunks))]
+    metadatas = [{"source": c["source"]} for c in all_chunks]
+
+    collection.add(
+        ids=ids,
+        embeddings=all_vectors,
+        documents=texts,
+        metadatas=metadatas,
+    )
+
+    print(f"💾 索引已保存到 {persist_dir}/（{collection.count()} 条，维度 1024）")
 
 
 if __name__ == "__main__":
