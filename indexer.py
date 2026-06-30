@@ -18,7 +18,7 @@ import chromadb
 load_dotenv()
 
 client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    api_key=os.getenv("SILICONFLOW_API_KEY"),
     base_url="https://api.siliconflow.cn/v1",
 )
 
@@ -67,7 +67,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """批量调用 DeepSeek embedding API，返回 1024 维向量列表"""
+    """批量调用 BAAI embedding API，返回 1024 维向量列表"""
     resp = client.embeddings.create(
         model="BAAI/bge-m3",
         input=texts,
