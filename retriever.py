@@ -34,7 +34,7 @@ from openai import OpenAI
 import chromadb
 from rank_bm25 import BM25Okapi
 import jieba
-from FlagEmbedding import FlagReranker
+from sentence_transformers import CrossEncoder
 
 load_dotenv()
 
@@ -258,11 +258,10 @@ _reranker = None
 def _get_reranker():
     global _reranker
     if _reranker is None:
-        # ModelScope 本地路径（国内下载快，不翻墙）
         model_path = os.path.expanduser(
             "~/.cache/modelscope/hub/models/BAAI/bge-reranker-v2-m3"
         )
-        _reranker = FlagReranker(model_path, use_fp16=True)
+        _reranker = CrossEncoder(model_path, trust_remote_code=True)
     return _reranker
 
 
@@ -314,44 +313,43 @@ def rerank(query: str, candidates: list[dict], top_k: int = 3) -> list[dict]:
       粗排（Bi-Encoder）：  query 嵌一下 / doc 嵌一下 / 余弦比一下 → 毫秒级
       精排（Cross-Encoder）：query+doc 拼一起喂给 transformer → 逐对跑 → 慢但准
 
-    为什么不能全量跑？
-      Cross-Encoder 每条 ~30ms，109 条全跑 = 3 秒还算能接受
-      但生产里 10 万条 = 50 分钟 → 所以只能对粗排的 top-K 做精排
-      （对应 #017 学的"粗排 top-100 → 精排 top-10"）
-
     参数:
       query: 用户问题原文
       candidates: search() 返回的 top-K 候选 chunk
       top_k: 精排后保留几条
 
     返回:
-      同 search() 格式，但 score 被替换为 cross-encoder 的相关性分（0~1，越大越相关）
-
-    FlagReranker.compute_score() 的特殊用法：
-      传 [query, doc1, doc2, doc3, ...] → 返回 [query分, doc1分, doc2分, ...]
-      第一个是 query 自身的分数（忽略），后面的才是每条 doc 的真实相关性分
+      同 search() 格式，但 score 被替换为 cross-encoder 的相关性分
     """
     if not candidates:
         return []
 
-    # 把 query 和所有候选拼成一对一的列表
-    # ["什么是HyDE？", "doc1文本", "doc2文本", ...]
-    pairs = [query, *[c["text"] for c in candidates]]
+    # 构造 (query, doc) 逐对列表
+    # [("什么是HyDE？", "doc1文本"), ("什么是HyDE？", "doc2文本"), ...]
+    pairs = [[query, c["text"]] for c in candidates]
 
-    # 一次性逐对打分（FlagEmbedding 内部会依次处理 query+doc1, query+doc2, ...）
-    scores = _get_reranker().compute_score(pairs, normalize=True)
-    # scores = [query分, doc0分, doc1分, doc2分, ...]
-    # query 自身分数没用，跳过 scores[0]
+    # 逐对打分
+    scores = _get_reranker().predict(pairs)
 
     # 把精排分写回 candidates 的 score 字段
     for i, c in enumerate(candidates):
-        c["score"] = round(float(scores[i + 1]), 3)
+        c["score"] = round(float(scores[i]), 3)
 
     # 按精排分降序
     ranked = sorted(candidates, key=lambda x: -x["score"])
     return ranked[:top_k]
 
 
+def search_with_fallback(query: str, first_top_k: int = 10, second_top_k: int = 5):
+    results_0 = search(query,first_top_k)
+    results = rerank(query,results_0,second_top_k)
+    sources = {result["source"] for result in results}
+    last_result = [
+        chunk
+        for chunk in CHUNKS
+        if chunk["source"] in sources
+    ]
+    return last_result
 # ═══════════════════════════════════════════════════════════════
 #  命令行调试入口
 # ═══════════════════════════════════════════════════════════════
@@ -360,7 +358,19 @@ if __name__ == "__main__":
     import sys
     q = sys.argv[1] if len(sys.argv) > 1 else "什么是 RAG？"
     print(f"🔍 查询: {q}\n")
-    results = search(q)
-    for i, r in enumerate(results):
+    results_0 = search(q)
+    print("-------------------------------------------- 粗排序 top5-------------------------------------------------------------------")
+    for i, r in enumerate(results_0):
         print(f"{i+1}. [{r['score']:.3f}] {r['source']}")
+        print(f"   {r['text'][:100]}...\n")
+    results = rerank(q,results_0)
+    sources = {result["source"] for result in results}
+    last_result = [
+        chunk
+        for chunk in CHUNKS
+        if chunk["source"] in sources
+    ]
+    print("-------------------------------------------- 精排序 top3-------------------------------------------------------------------")
+    for i, r in enumerate(last_result):
+        print(f"{i+1}. {r['source']}")
         print(f"   {r['text'][:100]}...\n")

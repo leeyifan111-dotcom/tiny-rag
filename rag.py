@@ -37,13 +37,15 @@ SYSTEM_PROMPT = """你是一个基于检索的问答助手。
 """
 
 
-def ask(question: str, top_k: int = 3) -> str:
+def ask(question: str, first_top_k: int = 10, second_top_k: int = 5) -> str:
     """RAG 主流程：检索 → 拼 prompt → 生成"""
     # 1. 检索相关 chunks
-    chunks = search_with_fallback(question, top_k=top_k)
+    chunks = search_with_fallback(question, first_top_k, second_top_k)
 
     if not chunks:
         return "参考资料中未包含相关内容"
+
+    print(f"获取到{len(chunks)}个chunk")
 
     # 2. 拼接上下文
     context = "\n\n".join(
