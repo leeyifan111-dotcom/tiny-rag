@@ -340,7 +340,7 @@ def rerank(query: str, candidates: list[dict], top_k: int = 3) -> list[dict]:
     return ranked[:top_k]
 
 
-def search_with_fallback(query: str, first_top_k: int = 10, second_top_k: int = 5):
+def search_with_expand(query: str, first_top_k: int = 10, second_top_k: int = 5):
     results_0 = search(query,first_top_k)
     results = rerank(query,results_0,second_top_k)
     sources = {result["source"] for result in results}

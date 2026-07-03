@@ -10,10 +10,11 @@ v0.3 加：JSON Mode 给答案打分（#020 + #061）
 """
 
 import os
+import json
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from retriever import search_with_fallback
+from retriever import search_with_expand
 
 load_dotenv()
 
@@ -40,17 +41,22 @@ SYSTEM_PROMPT = """你是一个基于检索的问答助手。
 def ask(question: str, first_top_k: int = 10, second_top_k: int = 5) -> str:
     """RAG 主流程：检索 → 拼 prompt → 生成"""
     # 1. 检索相关 chunks
-    chunks = search_with_fallback(question, first_top_k, second_top_k)
+    chunks = search_with_expand(question, first_top_k, second_top_k)
 
     if not chunks:
         return "参考资料中未包含相关内容"
 
     print(f"获取到{len(chunks)}个chunk")
 
-    # 2. 拼接上下文
-    context = "\n\n".join(
-        f"[来源: {c['source']}]\n{c['text']}" for c in chunks
-    )
+    # 2. 拼接上下文（最多 6000 字符，防爆上下文窗口）
+    context = ""
+    total = 0
+    for c in chunks:
+        line = f"[来源: {c['source']}]\n{c['text']}\n\n"
+        if total + len(line) > 6000:
+            break
+        context += line
+        total += len(line)
 
     # 3. 喂给 LLM 生成
     resp = client.chat.completions.create(
@@ -64,12 +70,35 @@ def ask(question: str, first_top_k: int = 10, second_top_k: int = 5) -> str:
 
 
 def evaluate(question: str, answer: str, contexts: list[str]) -> dict:
-    """评估答案质量（#020 RAG 评估指标 + #061 JSON Mode）
+    """用 JSON Mode 评估答案的 faithfulness + relevance（#020 + #061）
 
     返回: {"faithfulness": 1-5, "relevance": 1-5, "reason": "..."}
+
+    faithfulness: 答案是不是基于资料写的，有没有编造？
+    relevance:   资料跟用户问题有没有关系？
     """
-    # TODO: 等读完 #020 + #061 再实现
-    raise NotImplementedError("等读完 #020 RAG 评估再填")
+    eval_prompt = f"""你是一个 RAG 质量评估专家。根据以下信息，用 1-5 分评估生成的答案。
+
+用户问题：
+{question}
+
+参考资料（最多 5 条）：
+{chr(10).join(f"- {c[:300]}" for c in contexts[:5])}
+
+生成的答案：
+{answer[:500]}
+
+输出 JSON：{{"faithfulness": 1-5, "relevance": 1-5, "reason": "简述依据"}}
+
+- faithfulness：1=完全编造，3=部分有据，5=严格基于资料
+- relevance：1=资料跟问题无关，3=部分相关，5=高度匹配"""
+
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": eval_prompt}],
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content)
 
 
 if __name__ == "__main__":
@@ -78,3 +107,11 @@ if __name__ == "__main__":
     print(f"\n❓ 问题: {question}\n")
     answer = ask(question)
     print(f"\n💬 回答:\n{answer}\n")
+
+    # 评估
+    chunks = search_with_expand(question)
+    if chunks:
+        texts = [c["text"] for c in chunks]
+        result = evaluate(question, answer, texts)
+        print(f"📊 评估: faithfulness={result['faithfulness']}/5, relevance={result['relevance']}/5")
+        print(f"   理由: {result['reason']}")
