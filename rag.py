@@ -129,12 +129,12 @@ def evaluate(question: str, answer: str, contexts: list[str]) -> dict:
 
     faithfulness = supported / len(claims)
 
-    # ── Answer Relevance：基于问题生成反问 → 看答案覆盖度 ──
-    reverse_prompt = f"""基于以下问题，生成 3 个不同角度的子问题，用于验证答案是否完整覆盖。
-输出 JSON：{{"questions": ["子问题1", "子问题2", "子问题3"]}}
+    # ── Answer Relevance：反问匹配 ──
+    reverse_prompt = f"""基于以下答案，生成 3 个不同角度的问题，这些问题是这个答案在回答的。
+输出 JSON：{{"questions": ["问题1", "问题2", "问题3"]}}
 
-问题：
-{question}"""
+答案：
+{answer}"""
 
     rev_resp = client.chat.completions.create(
         model="deepseek-chat",
